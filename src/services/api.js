@@ -1,10 +1,28 @@
 import axios from 'axios';
 
-// Use import.meta.env for Vite environment variables
-const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
-// For absolute URLs, keep as is; for relative URLs, use window.location.origin
-const FULL_API_URL = API_BASE_URL.startsWith('http') ? API_BASE_URL : `${window.location.origin}${API_BASE_URL}`;
-const AUTH_ENDPOINT = `${API_BASE_URL}/auth`;
+// Normalize any provided API base to ensure it ends with /api
+function normalizeApiBaseUrl(raw) {
+  const defaultPath = '/api';
+  if (!raw) return defaultPath;
+  const value = raw.trim();
+  if (value.startsWith('http://') || value.startsWith('https://')) {
+    try {
+      const url = new URL(value);
+      if (!url.pathname.endsWith('/api')) {
+        url.pathname = url.pathname.replace(/\/$/, '') + '/api';
+      }
+      return url.toString().replace(/\/$/, '');
+    } catch {
+      return defaultPath;
+    }
+  }
+  const rel = value.startsWith('/') ? value : `/${value}`;
+  return rel.endsWith('/api') ? rel : rel.replace(/\/$/, '') + '/api';
+}
+
+let API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_API_URL || 'https://ratan-decor.loca.lt');
+let FULL_API_URL = API_BASE_URL.startsWith('http') ? API_BASE_URL : `${window.location.origin}${API_BASE_URL}`;
+let AUTH_ENDPOINT = `${API_BASE_URL}/auth`;
 
 class API {
   constructor() {
@@ -20,7 +38,30 @@ class API {
 
     this.cache = new Map(); // Cache with TTL
     this.cacheTTL = 5 * 60 * 1000; // 5 minutes TTL
+    this._redirectingToLogin = false; // Prevent repeated redirects
+    this.protectedPrefixes = [
+      '/auth/profile',
+      '/cart',
+      '/orders',
+      '/addresses',
+      '/shipping-address',
+      '/roles',
+      '/users',
+      '/admin',
+      '/categories'
+    ];
     this.setupInterceptors();
+  }
+
+  // Allow runtime switching between localhost and loca.lt without rebuild
+  setBaseUrl(newBaseUrl) {
+    API_BASE_URL = normalizeApiBaseUrl(newBaseUrl);
+    FULL_API_URL = API_BASE_URL.startsWith('http') ? API_BASE_URL : `${window.location.origin}${API_BASE_URL}`;
+    AUTH_ENDPOINT = `${API_BASE_URL}/auth`;
+    this.instance.defaults.baseURL = API_BASE_URL;
+    this.AUTH_ENDPOINT = AUTH_ENDPOINT;
+    this.FULL_API_URL = FULL_API_URL;
+    this.invalidateCache();
   }
 
   setupInterceptors() {
@@ -31,8 +72,7 @@ class API {
         if (token) {
           config.headers.Authorization = `Bearer ${token}`;
         }
-        config.headers['X-Request-ID'] = this.generateRequestId();
-        if (import.meta.env.MODE === 'development') {
+        if (import.meta.env.MODE === 'development' && import.meta.env.VITE_API_DEBUG === 'true') {
           console.log(`🚀 [API] Request: ${config.method?.toUpperCase()} ${config.url}`, {
             data: config.data,
             params: config.params,
@@ -49,21 +89,15 @@ class API {
     // Response interceptor
     this.instance.interceptors.response.use(
       (response) => {
-        if (import.meta.env.MODE === 'development') {
+        if (import.meta.env.MODE === 'development' && import.meta.env.VITE_API_DEBUG === 'true') {
           console.log(`✅ [API] Response: ${response.config.method?.toUpperCase()} ${response.config.url}`, response.data);
-        }
-        if (response.config.method?.toLowerCase() === 'get') {
-          this.cache.set(response.config.url, {
-            data: response.data,
-            timestamp: Date.now(),
-          });
         }
         return response;
       },
       async (error) => {
         if (error.response) {
           const { status, data } = error.response;
-          if (import.meta.env.MODE === 'development') {
+          if (import.meta.env.MODE === 'development' && import.meta.env.VITE_API_DEBUG === 'true') {
             console.error(`❌ [API] Error: ${status} ${data?.message || 'No message'}`, {
               url: error.config?.url,
               method: error.config?.method,
@@ -170,8 +204,16 @@ class API {
     localStorage.setItem('userId', data.user.id);
     localStorage.setItem('email', data.user.email);
     localStorage.setItem('username', data.user.name || data.user.username);
-    const mappedUserType = this.mapUserType(data.user.userType || data.user.userTypeId || 'General');
+    const mappedUserType = this.mapUserType(
+      data.user.userTypeName || data.user.userType || 'General'
+    );
     localStorage.setItem('userType', mappedUserType);
+    if (data.user.userTypeId !== undefined && data.user.userTypeId !== null) {
+      localStorage.setItem('userTypeId', String(data.user.userTypeId));
+    }
+    if (data.user.userTypeName) {
+      localStorage.setItem('userTypeName', data.user.userTypeName);
+    }
     localStorage.setItem('userRole', this.mapUserRole(data.user.role || 'General'));
     localStorage.setItem('userStatus', data.user.status || 'Approved');
     this.invalidateCache(); // Invalidate cache on auth data change
@@ -179,16 +221,37 @@ class API {
 
   clearAuthData() {
     if (typeof window === 'undefined') return;
-    const keysToRemove = ['token', 'userId', 'email', 'username', 'userType', 'userRole', 'userStatus'];
+    const keysToRemove = ['token', 'userId', 'email', 'username', 'userType', 'userTypeId', 'userTypeName', 'userRole', 'userStatus'];
     keysToRemove.forEach((key) => localStorage.removeItem(key));
     this.invalidateCache(); // Invalidate cache on logout
   }
 
   async handleUnauthorized() {
+    // Prevent multiple redirects or reload loops
+    if (typeof window !== 'undefined') {
+      if (window.location.pathname === '/login') {
+        return false;
+      }
+      const now = Date.now();
+      const lastRedirectTs = Number(sessionStorage.getItem('lastLoginRedirectTs') || '0');
+      if (this._redirectingToLogin || (now - lastRedirectTs) < 4000) {
+        return false;
+      }
+      this._redirectingToLogin = true;
+      sessionStorage.setItem('lastLoginRedirectTs', String(now));
+    }
+
     this.clearAuthData();
     if (typeof window !== 'undefined') {
-      localStorage.setItem('intendedPath', window.location.pathname);
-      window.location.href = '/login';
+      if (window.location.pathname !== '/login') {
+        localStorage.setItem('intendedPath', window.location.pathname);
+      }
+      try {
+        window.location.replace('/login');
+      } finally {
+        // Reset flag shortly after to allow future redirects if needed
+        setTimeout(() => { this._redirectingToLogin = false; }, 5000);
+      }
     }
     // Placeholder for token refresh (not implemented in backend)
     const refreshToken = localStorage.getItem('refreshToken');
@@ -241,7 +304,11 @@ class API {
       others: 'Others',
       general: 'General',
     };
-    return typeMap[userType?.toLowerCase().replace(/\s+/g, '')] || 'General';
+    if (userType === null || userType === undefined) return 'General';
+    const normalized = String(userType).toLowerCase().replace(/\s+/g, '');
+    // Special-case to support keys that contain space when not stripped first
+    if (normalized === 'modularkitchen') return 'Modular Kitchen';
+    return typeMap[normalized] || 'General';
   }
 
   invalidateCache() {
@@ -250,6 +317,26 @@ class API {
 
   async request(endpoint, method = 'GET', data = null, options = {}, retryCount = 0, handleRateLimiting = false) {
     try {
+      // Soft fallback for a non-existent convenience endpoint
+      if (endpoint === '/userType/my-type') {
+        const userTypeName = localStorage.getItem('userTypeName') || localStorage.getItem('userType') || 'General';
+        return { success: true, userType: this.mapUserType(userTypeName) };
+      }
+
+      // Avoid protected calls when unauthenticated
+      const token = this.getToken();
+      const isProtected = this.protectedPrefixes.some((p) => endpoint === p || endpoint.startsWith(p + '/'));
+      if (!token && isProtected) {
+        if (endpoint === '/auth/profile') {
+          const cached = this.getUserData();
+          if (cached) return { user: cached };
+        }
+        if (endpoint.startsWith('/orders')) {
+          return { stats: { totalOrders: 0, pendingOrders: 0, completedOrders: 0, cancelledOrders: 0, totalValue: 0, thisMonthValue: 0, averageOrderValue: 0 }, recentOrders: [] };
+        }
+        throw new Error('Not authenticated');
+      }
+
       const cacheKey = `${method.toUpperCase()}:${endpoint}${data ? JSON.stringify(data) : ''}${JSON.stringify(options.params || {})}`;      const cached = this.cache.get(cacheKey);
 
       if (cached && (Date.now() - cached.timestamp < this.cacheTTL)) {
@@ -272,6 +359,12 @@ class API {
 
       try {
         const response = await this.instance(config);
+        if (config.method === 'get') {
+          this.cache.set(cacheKey, {
+            data: response.data,
+            timestamp: Date.now(),
+          });
+        }
         return response.data;
       } catch (requestError) {
         // Handle rate limiting (429) errors with special retry logic
@@ -356,16 +449,20 @@ class API {
   // Check if the backend server is available
   async checkServerAvailability() {
     try {
+      // Determine origin (absolute takes precedence)
+      let origin;
+      if (API_BASE_URL.startsWith('http')) {
+        const u = new URL(API_BASE_URL);
+        origin = `${u.protocol}//${u.host}`;
+      } else {
+        origin = window.location.origin;
+      }
+
       // Try multiple approaches to check server availability
-      
-      // 1. First try with fetch API to the health endpoint
+
+      // 1. First try with fetch API to the root health endpoint (no headers to avoid preflight)
       try {
-        const response = await fetch(`${API_BASE_URL}/health`, {
-          method: 'GET',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-        });
+        const response = await fetch(`${origin}/health`, { method: 'GET' });
         
         if (response.ok) {
           console.log('Server health check successful with fetch API');
@@ -376,14 +473,9 @@ class API {
         // Continue to next approach
       }
       
-      // 2. Try with fetch API to the base URL
+      // 2. Try with fetch API to the base URL (no headers to avoid preflight)
       try {
-        const response = await fetch(API_BASE_URL, {
-          method: 'GET',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-        });
+        const response = await fetch(API_BASE_URL, { method: 'GET' });
         
         if (response.ok || response.status === 404) {
           // Even a 404 means the server is running
@@ -395,14 +487,9 @@ class API {
         // Continue to next approach
       }
       
-      // 3. Try with fetch API using the full URL (with origin)
+      // 3. Try with fetch API using the full URL (with origin, no headers)
       try {
-        const response = await fetch(FULL_API_URL, {
-          method: 'GET',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-        });
+        const response = await fetch(FULL_API_URL, { method: 'GET' });
         
         if (response.ok || response.status === 404) {
           // Even a 404 means the server is running
@@ -414,9 +501,9 @@ class API {
         // Continue to next approach
       }
       
-      // 4. Fallback to axios
+      // 4. Fallback to axios against root health
       try {
-        await this.instance.get('/health', { timeout: 5000 });
+        await axios.get(`${origin}/health`, { timeout: 5000, withCredentials: true });
         console.log('Server health check successful with axios');
         return true;
       } catch (axiosError) {
@@ -476,7 +563,6 @@ class API {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({ email, password }),
-          credentials: 'include',
         });
         
         data = await this.handleResponse(response);
@@ -499,7 +585,6 @@ class API {
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({ email, password }),
-            credentials: 'include',
           });
           
           data = await this.handleResponse(response);
@@ -723,7 +808,7 @@ class API {
       this.#lastProfileFetch = now;
       
       // Make the actual request with retry logic for 429 errors
-      return await this.request('/auth/me', 'GET', null, {}, 0, true);
+      return await this.request('/auth/profile', 'GET', null, {}, 0, true);
     } catch (error) {
       // Still return a valid response structure even on error
       const username = localStorage.getItem('username') || 'User';
@@ -771,7 +856,7 @@ class API {
       }
     });
     try {
-      const response = await this.request('/auth/me', 'PUT', cleanedData, {}, 0, true);
+      const response = await this.request('/auth/profile', 'PUT', cleanedData, {}, 0, true);
       if (response.user) {
         this.setAuthData({ token: this.getToken(), user: response.user });
       }
@@ -896,6 +981,30 @@ class API {
         }
       });
       if (files.length > 0) {
+        files.forEach((file) => {
+          formData.append('images', file);
+        });
+      }
+      return await this.request('/products', 'POST', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+    } catch (error) {
+      throw new Error(error.response?.data?.message || 'Failed to create product.');
+    }
+  }
+
+  async updateProduct(id, productData, files = []) {
+    if (!id) {
+      throw new Error('Product ID is required');
+    }
+    try {
+      const formData = new FormData();
+      Object.entries(productData || {}).forEach(([key, value]) => {
+        if (value !== null && value !== undefined) {
+          formData.append(key, typeof value === 'object' ? JSON.stringify(value) : value);
+        }
+      });
+      if (files && files.length > 0) {
         files.forEach((file) => {
           formData.append('images', file);
         });
@@ -1174,6 +1283,17 @@ class API {
       return await this.request(`/shipping-address/${addressId}`, 'DELETE');
     } catch (error) {
       throw new Error(error.response?.data?.message || 'Failed to delete shipping address.');
+    }
+  }
+
+  async setDefaultShippingAddress(addressId) {
+    if (!addressId) {
+      throw new Error('Address ID is required');
+    }
+    try {
+      return await this.request(`/shipping-address/${addressId}/default`, 'PATCH');
+    } catch (error) {
+      throw new Error(error.response?.data?.message || 'Failed to set default shipping address.');
     }
   }
 
@@ -1470,7 +1590,7 @@ class API {
   // ============= PROFILE MANAGEMENT =============
   async getProfileData() {
     try {
-      return await this.request('/auth/me', 'GET');
+      return await this.request('/auth/profile', 'GET');
     } catch (error) {
       throw new Error(error.response?.data?.message || 'Failed to fetch profile.');
     }
@@ -1490,13 +1610,38 @@ class API {
           }
         }
       });
-      const response = await this.request('/auth/me', 'PUT', cleanedData);
+      const response = await this.request('/auth/profile', 'PUT', cleanedData);
       if (response.user) {
         this.setAuthData({ token: this.getToken(), user: response.user });
       }
       return response;
     } catch (error) {
       throw new Error(error.response?.data?.message || 'Failed to update profile.');
+    }
+  }
+
+  // Additional helpers
+  async getCartCount() {
+    try {
+      return await this.request('/cart/count', 'GET');
+    } catch (error) {
+      throw new Error(error.response?.data?.message || 'Failed to fetch cart count.');
+    }
+  }
+
+  async getOrderStats() {
+    try {
+      return await this.request('/orders/stats', 'GET');
+    } catch (error) {
+      return { stats: { totalOrders: 0, pendingOrders: 0, completedOrders: 0, cancelledOrders: 0, totalValue: 0, thisMonthValue: 0, averageOrderValue: 0 }, recentOrders: [] };
+    }
+  }
+
+  async getAvailableOrderAddresses() {
+    try {
+      return await this.request('/orders/addresses', 'GET');
+    } catch (error) {
+      throw new Error(error.response?.data?.message || 'Failed to fetch available addresses.');
     }
   }
 
