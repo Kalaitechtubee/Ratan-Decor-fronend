@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 // Use import.meta.env for Vite environment variables
-const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://ratan-decor.loca.lt/api';
 // For absolute URLs, keep as is; for relative URLs, use window.location.origin
 const FULL_API_URL = API_BASE_URL.startsWith('http') ? API_BASE_URL : `${window.location.origin}${API_BASE_URL}`;
 const AUTH_ENDPOINT = `${API_BASE_URL}/auth`;
@@ -1436,7 +1436,8 @@ class API {
   // Add these methods inside the API class in your API file
 async getAllSeo() {
   try {
-    return await this.request('/api/seo', 'GET');
+    // Modified to use /seo instead of /api/seo since the API base URL already includes /api
+    return await this.request('/seo', 'GET');
   } catch (error) {
     throw new Error(error.message || 'Failed to fetch SEO data.');
   }
@@ -1444,7 +1445,8 @@ async getAllSeo() {
 
 async getAllPageNames() {
   try {
-    return await this.request('/api/seo/pagenames', 'GET');
+    // Modified to use /seo/pagenames instead of /api/seo/pagenames
+    return await this.request('/seo/pagenames', 'GET');
   } catch (error) {
     throw new Error(error.message || 'Failed to fetch page names.');
   }
@@ -1455,7 +1457,8 @@ async updateSeo(id, seoData) {
     throw new Error('SEO ID, pageName, and title are required');
   }
   try {
-    return await this.request(`/api/seo/${id}`, 'PUT', seoData);
+    // Modified to use /seo/${id} instead of /api/seo/${id}
+    return await this.request(`/seo/${id}`, 'PUT', seoData);
   } catch (error) {
     throw new Error(error.message || 'Failed to update SEO data.');
   }

@@ -3,7 +3,14 @@ import react from '@vitejs/plugin-react'
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react({
+    // Add this to ensure JSX is properly handled
+    include: "**/*.jsx",
+  })],
+  esbuild: {
+    loader: 'jsx',
+    include: /src\/.*\.(js|jsx)$/, // treat all .js and .jsx files in src as JSX
+  },
   server: {
     proxy: {
       '/api': {
