@@ -156,6 +156,7 @@ class API {
         email: localStorage.getItem('email'),
         name: localStorage.getItem('username'),
         userType: localStorage.getItem('userType'),
+        userTypeName: localStorage.getItem('userTypeName'),
         role: localStorage.getItem('userRole'),
         status: localStorage.getItem('userStatus'),
       };
@@ -170,16 +171,16 @@ class API {
     localStorage.setItem('userId', data.user.id);
     localStorage.setItem('email', data.user.email);
     localStorage.setItem('username', data.user.name || data.user.username);
-    const mappedUserType = this.mapUserType(data.user.userType || data.user.userTypeId || 'General');
-    localStorage.setItem('userType', mappedUserType);
-    localStorage.setItem('userRole', this.mapUserRole(data.user.role || 'General'));
+    localStorage.setItem('userRole', data.user.role || 'General');
     localStorage.setItem('userStatus', data.user.status || 'Approved');
+    localStorage.setItem('userTypeId', data.user.userTypeId || '');
+    localStorage.setItem('userTypeName', data.user.userTypeName || '');
     this.invalidateCache(); // Invalidate cache on auth data change
   }
 
   clearAuthData() {
     if (typeof window === 'undefined') return;
-    const keysToRemove = ['token', 'userId', 'email', 'username', 'userType', 'userRole', 'userStatus'];
+    const keysToRemove = ['token', 'userId', 'email', 'username', 'userRole', 'userStatus', 'userTypeId', 'userTypeName'];
     keysToRemove.forEach((key) => localStorage.removeItem(key));
     this.invalidateCache(); // Invalidate cache on logout
   }
@@ -190,58 +191,27 @@ class API {
       localStorage.setItem('intendedPath', window.location.pathname);
       window.location.href = '/login';
     }
-    // Placeholder for token refresh (not implemented in backend)
-    const refreshToken = localStorage.getItem('refreshToken');
-    if (refreshToken) {
-      try {
-        const response = await this.request('/auth/refresh', 'POST', { refreshToken });
-        this.setAuthData(response);
-        return true; // Indicate refresh success
-      } catch {
-        return false; // Refresh failed
-      }
-    }
     return false;
   }
 
   async handleUserTypeError() {
     const userData = this.getUserData();
     if (userData?.id && userData.role === 'Admin') {
-      // For admins, set a default userType temporarily
-      localStorage.setItem('userType', 'General');
-      this.invalidateCache();
-      return;
+      // For admins, try to fetch profile to get updated userType
+      try {
+        const profile = await this.getProfile();
+        if (profile?.user) {
+          this.setAuthData({ token: this.getToken(), user: profile.user });
+        }
+        return;
+      } catch (error) {
+        console.warn('Failed to fetch profile:', error.message);
+      }
     }
-    // For non-admins, redirect to contact admin page or login
+    // For non-admins or if profile fetch fails, redirect to contact admin page
     if (typeof window !== 'undefined') {
       window.location.href = '/contact-admin';
     }
-  }
-
-  mapUserRole(role) {
-    const roleMap = {
-      general: 'General',
-      customer: 'General',
-      architect: 'Architect',
-      dealer: 'Dealer',
-      admin: 'Admin',
-      manager: 'Manager',
-      sales: 'Sales',
-      support: 'Support',
-    };
-    return roleMap[role?.toLowerCase()] || 'General';
-  }
-
-  mapUserType(userType) {
-    const typeMap = {
-      residential: 'Residential',
-      commercial: 'Commercial',
-      'modular kitchen': 'Modular Kitchen',
-      modularkitchen: 'Modular Kitchen',
-      others: 'Others',
-      general: 'General',
-    };
-    return typeMap[userType?.toLowerCase().replace(/\s+/g, '')] || 'General';
   }
 
   invalidateCache() {
@@ -250,7 +220,8 @@ class API {
 
   async request(endpoint, method = 'GET', data = null, options = {}, retryCount = 0, handleRateLimiting = false) {
     try {
-      const cacheKey = `${method.toUpperCase()}:${endpoint}${data ? JSON.stringify(data) : ''}${JSON.stringify(options.params || {})}`;      const cached = this.cache.get(cacheKey);
+      const cacheKey = `${method.toUpperCase()}:${endpoint}${data ? JSON.stringify(data) : ''}${JSON.stringify(options.params || {})}`;
+      const cached = this.cache.get(cacheKey);
 
       if (cached && (Date.now() - cached.timestamp < this.cacheTTL)) {
         return cached.data;
@@ -454,123 +425,25 @@ class API {
     // Validate input
     this.validateInput({ email, password }, ['email', 'password'], { validateEmail: true });
     
-    // Check server availability before attempting login
-    const isServerAvailable = await this.checkServerAvailability();
-    if (!isServerAvailable) {
-      throw new Error('Backend server is not available. Please try again later or contact support.');
-    }
-    
     try {
-      let data;
-      let loginSuccessful = false;
-      let loginError = null;
+      const response = await this.request('/auth/login', 'POST', { email, password });
       
-      // Try multiple approaches to login
-      
-      // 1. First try with fetch API to the login endpoint
-      try {
-        console.log('Attempting login with fetch API');
-        const response = await fetch(`${this.AUTH_ENDPOINT}/login`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ email, password }),
-          credentials: 'include',
-        });
-        
-        data = await this.handleResponse(response);
-        loginSuccessful = true;
-        console.log('Login successful with fetch API');
-      } catch (fetchError) {
-        console.log('Fetch login attempt failed:', fetchError.message);
-        loginError = fetchError;
-        // Continue to next approach
-      }
-      
-      // 2. If first fetch attempt failed, try with full URL
-      if (!loginSuccessful) {
-        try {
-          console.log('Attempting login with fetch API using full URL');
-          const fullLoginUrl = `${FULL_API_URL}/auth/login`;
-          const response = await fetch(fullLoginUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ email, password }),
-            credentials: 'include',
-          });
-          
-          data = await this.handleResponse(response);
-          loginSuccessful = true;
-          console.log('Login successful with fetch API using full URL');
-        } catch (fetchFullUrlError) {
-          console.log('Fetch login with full URL attempt failed:', fetchFullUrlError.message);
-          // Continue to next approach
-        }
-      }
-      
-      // 3. If fetch attempts failed, try with axios
-      if (!loginSuccessful) {
-        try {
-          console.log('Attempting login with axios');
-          const response = await this.instance.post('/auth/login', { email, password });
-          data = response.data;
-          loginSuccessful = true;
-          console.log('Login successful with axios');
-        } catch (axiosError) {
-          console.log('Axios login attempt failed:', axiosError.message);
-          // If all methods failed, throw the original error
-          if (loginError) {
-            throw loginError;
-          }
-          throw axiosError;
-        }
-      }
-      
-      // Process successful login
-      if (loginSuccessful && data) {
-        if (data.token) {
-          localStorage.setItem('token', data.token);
-        }
-        
+      if (response && response.token) {
         // Set auth data in local storage
-        this.setAuthData(data);
+        this.setAuthData(response);
         
         return {
           success: true,
-          token: data.token,
-          user: {
-            id: data.user.id,
-            email: data.user.email,
-            name: data.user.name || data.user.username,
-            role: this.mapUserRole(data.user.role),
-            userType: this.mapUserType(data.user.userType || data.user.userTypeId),
-            status: data.user.status,
-          },
-          message: data.message || 'Login successful',
+          token: response.token,
+          user: response.user,
+          message: response.message || 'Login successful',
         };
       } else {
-        throw new Error('Login failed with all available methods');
+        throw new Error('Login failed - no token received');
       }
     } catch (error) {
       console.error('Login error:', error);
-      
-      // Provide more specific error messages
-      if (error.message && error.message.includes('Network Error')) {
-        throw new Error('Network error. Please check your internet connection and ensure the backend server is running.');
-      } else if (error.message && error.message.includes('CORS')) {
-        throw new Error('Cross-origin request blocked. This is likely a configuration issue with the API server.');
-      } else if (error.message && error.message.includes('timeout')) {
-        throw new Error('Request timed out. The server might be experiencing high load or connectivity issues.');
-      } else if (error.response && error.response.status === 401) {
-        throw new Error('Invalid credentials. Please check your email and password.');
-      } else if (error.response && error.response.status === 403) {
-        throw new Error('Your account is not authorized to log in. Please contact support.');
-      } else {
-        throw new Error(error.message || 'Invalid credentials. Please try again.');
-      }
+      throw new Error(error.message || 'Invalid credentials. Please try again.');
     }
   }
 
@@ -581,31 +454,23 @@ class API {
       validRoles
     });
   
-    const response = await fetch(`${this.AUTH_ENDPOINT}/register`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(userData),
-    });
-    
-    const data = await this.handleResponse(response);
-    return {
-      success: true,
-      userId: data.userId,
-      message: data.message,
-      requiresApproval: data.requiresApproval,
-      status: data.status
-    };
+    try {
+      const response = await this.request('/auth/register', 'POST', userData);
+      return {
+        success: true,
+        userId: response.userId,
+        message: response.message,
+        requiresApproval: response.requiresApproval,
+        status: response.status
+      };
+    } catch (error) {
+      throw new Error(error.message || 'Registration failed');
+    }
   }
   
   async logout() {
     try {
-      const response = await fetch(`${this.AUTH_ENDPOINT}/logout`, {
-        method: 'POST',
-        headers: this.getAuthHeaders(),
-      });
-      await this.handleResponse(response);
+      await this.request('/auth/logout', 'POST');
       return { success: true, message: 'Logged out successfully' };
     } catch (error) {
       console.error('Logout error:', error.message);
@@ -617,83 +482,70 @@ class API {
   
   async checkUserStatus(email) {
     this.validateInput({ email }, ['email'], { validateEmail: true });
-    const response = await fetch(`${this.AUTH_ENDPOINT}/status/${encodeURIComponent(email)}`, {
-      method: 'GET',
-      headers: this.getAuthHeaders(),
-    });
-    const data = await this.handleResponse(response);
-    return {
-      success: true,
-      user: data.user,
-    };
+    try {
+      const response = await this.request(`/auth/status/${encodeURIComponent(email)}`, 'GET');
+      return {
+        success: true,
+        user: response.user,
+      };
+    } catch (error) {
+      throw new Error(error.message || 'Failed to check user status');
+    }
   }
   
   async resendApproval(email) {
     this.validateInput({ email }, ['email'], { validateEmail: true });
-    const response = await fetch(`${this.AUTH_ENDPOINT}/resend-approval`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...this.getAuthHeaders(),
-      },
-      body: JSON.stringify({ email }),
-    });
-    const data = await this.handleResponse(response);
-    return {
-      success: true,
-      message: data.message,
-      status: data.status,
-    };
+    try {
+      const response = await this.request('/auth/resend-approval', 'POST', { email });
+      return {
+        success: true,
+        message: response.message,
+        status: response.status,
+      };
+    } catch (error) {
+      throw new Error(error.message || 'Failed to resend approval request');
+    }
   }
   
   async forgotPassword(email) {
     this.validateInput({ email }, ['email'], { validateEmail: true });
-    const response = await fetch(`${this.AUTH_ENDPOINT}/forgot-password`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ email }),
-    });
-    const data = await this.handleResponse(response);
-    return {
-      success: true,
-      message: data.message,
-      otpSent: data.otpSent,
-    };
+    try {
+      const response = await this.request('/auth/forgot-password', 'POST', { email });
+      return {
+        success: true,
+        message: response.message,
+        otpSent: response.otpSent,
+      };
+    } catch (error) {
+      throw new Error(error.message || 'Failed to send password reset OTP');
+    }
   }
   
   async verifyOTP({ email, otp }) {
     this.validateInput({ email, otp }, ['email', 'otp'], { validateEmail: true });
-    const response = await fetch(`${this.AUTH_ENDPOINT}/verify-otp`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ email, otp }),
-    });
-    const data = await this.handleResponse(response);
-    return {
-      success: true,
-      message: data.message,
-      resetToken: data.resetToken,
-    };
+    try {
+      const response = await this.request('/auth/verify-otp', 'POST', { email, otp });
+      return {
+        success: true,
+        message: response.message,
+        resetToken: response.resetToken,
+      };
+    } catch (error) {
+      throw new Error(error.message || 'Failed to verify OTP');
+    }
   }
   
   async resetPassword({ resetToken, newPassword }) {
     this.validateInput({ resetToken, newPassword }, ['resetToken', 'newPassword']);
-    const response = await fetch(`${this.AUTH_ENDPOINT}/reset-password`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ resetToken, newPassword }),
-    });
-    const data = await this.handleResponse(response);
-    return {
-      success: true,
-      message: data.message,
-    };
+    try {
+      const response = await this.request('/auth/reset-password', 'POST', { resetToken, newPassword });
+      return {
+        success: true,
+        message: response.message,
+      };
+    } catch (error) {
+      throw new Error(error.message || 'Failed to reset password');
+    }
   }
 
   // Track last profile fetch time to prevent rate limiting
@@ -714,7 +566,10 @@ class API {
           user: { 
             name: cachedUsername,
             email: localStorage.getItem('email'),
-            userType: localStorage.getItem('userType')
+            userTypeId: localStorage.getItem('userTypeId'),
+            userTypeName: localStorage.getItem('userTypeName'),
+            role: localStorage.getItem('userRole'),
+            status: localStorage.getItem('userStatus')
           } 
         };
       }
@@ -733,11 +588,14 @@ class API {
           user: { 
             name: username,
             email: localStorage.getItem('email'),
-            userType: localStorage.getItem('userType')
+            userTypeId: localStorage.getItem('userTypeId'),
+            userTypeName: localStorage.getItem('userTypeName'),
+            role: localStorage.getItem('userRole'),
+            status: localStorage.getItem('userStatus')
           } 
         };
       }
-      throw new Error(error.response?.data?.message || 'Failed to fetch profile.');
+      throw new Error(error.message || 'Failed to fetch profile.');
     }
   }
 
@@ -761,15 +619,10 @@ class API {
     const cleanedData = {};
     Object.entries(profileData).forEach(([key, value]) => {
       if (value !== null && value !== undefined && value !== '') {
-        if (key === 'role') {
-          cleanedData[key] = this.mapUserRole(value);
-        } else if (key === 'userType') {
-          cleanedData[key] = this.mapUserType(value);
-        } else {
-          cleanedData[key] = value;
-        }
+        cleanedData[key] = value;
       }
     });
+
     try {
       const response = await this.request('/auth/me', 'PUT', cleanedData, {}, 0, true);
       if (response.user) {
@@ -786,7 +639,7 @@ class API {
           user: this.getUserData()
         };
       }
-      throw new Error(error.response?.data?.message || 'Failed to update profile.');
+      throw new Error(error.message || 'Failed to update profile.');
     }
   }
 
@@ -795,7 +648,7 @@ class API {
     try {
       return await this.request('/user-types', 'GET');
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch user types.');
+      throw new Error(error.message || 'Failed to fetch user types.');
     }
   }
 
@@ -806,7 +659,7 @@ class API {
     try {
       return await this.request(`/user-types/${id}`, 'GET');
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch user type.');
+      throw new Error(error.message || 'Failed to fetch user type.');
     }
   }
 
@@ -820,7 +673,7 @@ class API {
         name: userTypeData.name.trim(),
       });
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to create user type.');
+      throw new Error(error.message || 'Failed to create user type.');
     }
   }
 
@@ -834,7 +687,7 @@ class API {
         name: userTypeData.name.trim(),
       });
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to update user type.');
+      throw new Error(error.message || 'Failed to update user type.');
     }
   }
 
@@ -845,15 +698,13 @@ class API {
     try {
       return await this.request(`/user-types/${id}`, 'DELETE');
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to delete user type.');
+      throw new Error(error.message || 'Failed to delete user type.');
     }
   }
 
   // ============= PRODUCT MANAGEMENT =============
   async getProducts(params = {}) {
     try {
-      const rawUserType = params.userType || localStorage.getItem('userType') || 'General';
-      const mappedUserType = this.mapUserType(rawUserType);
       const queryParams = {
         page: params.page || 1,
         limit: params.limit || 20,
@@ -862,11 +713,11 @@ class API {
         minPrice: params.minPrice,
         maxPrice: params.maxPrice,
         search: params.search,
-        userType: mappedUserType,
+        userType: params.userType,
       };
       return await this.request('/products', 'GET', queryParams);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch products.');
+      throw new Error(error.message || 'Failed to fetch products.');
     }
   }
 
@@ -875,12 +726,10 @@ class API {
       throw new Error('Product ID is required');
     }
     try {
-      const rawUserType = params.userType || localStorage.getItem('userType') || 'General';
-      const mappedUserType = this.mapUserType(rawUserType);
-      const queryParams = { userType: mappedUserType };
+      const queryParams = { userType: params.userType };
       return await this.request(`/products/${id}`, 'GET', queryParams);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch product details.');
+      throw new Error(error.message || 'Failed to fetch product details.');
     }
   }
 
@@ -900,11 +749,35 @@ class API {
           formData.append('images', file);
         });
       }
+      return await this.request('/products', 'POST', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+    } catch (error) {
+      throw new Error(error.message || 'Failed to create product.');
+    }
+  }
+
+  async updateProduct(id, productData, files = []) {
+    if (!id) {
+      throw new Error('Product ID is required');
+    }
+    try {
+      const formData = new FormData();
+      Object.entries(productData).forEach(([key, value]) => {
+        if (value !== null && value !== undefined) {
+          formData.append(key, typeof value === 'object' ? JSON.stringify(value) : value);
+        }
+      });
+      if (files.length > 0) {
+        files.forEach((file) => {
+          formData.append('images', file);
+        });
+      }
       return await this.request(`/products/${id}`, 'PUT', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to update product.');
+      throw new Error(error.message || 'Failed to update product.');
     }
   }
 
@@ -915,7 +788,7 @@ class API {
     try {
       return await this.request(`/products/${id}`, 'DELETE');
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to delete product.');
+      throw new Error(error.message || 'Failed to delete product.');
     }
   }
 
@@ -926,7 +799,7 @@ class API {
     try {
       return await this.request(`/products/${productId}/rate`, 'POST', ratingData);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to add product rating.');
+      throw new Error(error.message || 'Failed to add product rating.');
     }
   }
 
@@ -941,7 +814,7 @@ class API {
       };
       return await this.request(`/products/${productId}/ratings`, 'GET', queryParams);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch product ratings.');
+      throw new Error(error.message || 'Failed to fetch product ratings.');
     }
   }
 
@@ -949,11 +822,11 @@ class API {
   async getCategories(params = {}) {
     try {
       const queryParams = {
-        userTypeId: params.userTypeId || localStorage.getItem('userTypeId'),
+        userTypeId: params.userTypeId,
       };
       return await this.request('/categories', 'GET', queryParams);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch categories.');
+      throw new Error(error.message || 'Failed to fetch categories.');
     }
   }
 
@@ -963,22 +836,22 @@ class API {
     }
     try {
       const queryParams = {
-        userTypeId: params.userTypeId || localStorage.getItem('userTypeId'),
+        userTypeId: params.userTypeId,
       };
       return await this.request(`/categories/${parentId}/subcategories`, 'GET', queryParams);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch subcategories.');
+      throw new Error(error.message || 'Failed to fetch subcategories.');
     }
   }
 
   async createCategory(categoryData) {
-    if (!categoryData?.name || !categoryData?.userTypeId) {
-      throw new Error('Category name and user type ID are required');
+    if (!categoryData?.name) {
+      throw new Error('Category name is required');
     }
     try {
       return await this.request('/categories', 'POST', categoryData);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to create category.');
+      throw new Error(error.message || 'Failed to create category.');
     }
   }
 
@@ -989,7 +862,7 @@ class API {
     try {
       return await this.request(`/categories/${id}`, 'PATCH', categoryData);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to update category.');
+      throw new Error(error.message || 'Failed to update category.');
     }
   }
 
@@ -1000,7 +873,7 @@ class API {
     try {
       return await this.request(`/categories/${id}`, 'DELETE');
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to delete category.');
+      throw new Error(error.message || 'Failed to delete category.');
     }
   }
 
@@ -1016,7 +889,7 @@ class API {
       }
       return response;
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch cart.');
+      throw new Error(error.message || 'Failed to fetch cart.');
     }
   }
 
@@ -1027,7 +900,7 @@ class API {
     try {
       return await this.request('/cart', 'POST', { productId, quantity, ...options });
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to add item to cart.');
+      throw new Error(error.message || 'Failed to add item to cart.');
     }
   }
 
@@ -1038,7 +911,7 @@ class API {
     try {
       return await this.request(`/cart/${itemId}`, 'PUT', { quantity });
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to update cart item.');
+      throw new Error(error.message || 'Failed to update cart item.');
     }
   }
 
@@ -1049,7 +922,7 @@ class API {
     try {
       return await this.request(`/cart/${itemId}`, 'DELETE');
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to remove item from cart.');
+      throw new Error(error.message || 'Failed to remove item from cart.');
     }
   }
 
@@ -1057,7 +930,7 @@ class API {
     try {
       return await this.request('/cart', 'DELETE');
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to clear cart.');
+      throw new Error(error.message || 'Failed to clear cart.');
     }
   }
 
@@ -1069,7 +942,7 @@ class API {
     try {
       return await this.request('/orders', 'POST', orderData);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to create order.');
+      throw new Error(error.message || 'Failed to create order.');
     }
   }
 
@@ -1087,7 +960,7 @@ class API {
       };
       return await this.request('/orders', 'GET', queryParams);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch orders.');
+      throw new Error(error.message || 'Failed to fetch orders.');
     }
   }
 
@@ -1098,7 +971,7 @@ class API {
     try {
       return await this.request(`/orders/${orderId}`, 'GET');
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch order.');
+      throw new Error(error.message || 'Failed to fetch order.');
     }
   }
 
@@ -1109,7 +982,7 @@ class API {
     try {
       return await this.request(`/orders/${orderId}`, 'PUT', updateData);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to update order.');
+      throw new Error(error.message || 'Failed to update order.');
     }
   }
 
@@ -1120,7 +993,7 @@ class API {
     try {
       return await this.request(`/orders/${orderId}/cancel`, 'PUT', { reason });
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to cancel order.');
+      throw new Error(error.message || 'Failed to cancel order.');
     }
   }
 
@@ -1131,7 +1004,7 @@ class API {
     try {
       return await this.request(`/orders/${orderId}`, 'DELETE');
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to delete order.');
+      throw new Error(error.message || 'Failed to delete order.');
     }
   }
 
@@ -1140,7 +1013,7 @@ class API {
     try {
       return await this.request('/shipping-address', 'GET');
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch shipping addresses.');
+      throw new Error(error.message || 'Failed to fetch shipping addresses.');
     }
   }
 
@@ -1151,7 +1024,7 @@ class API {
     try {
       return await this.request('/shipping-address', 'POST', addressData);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to create shipping address.');
+      throw new Error(error.message || 'Failed to create shipping address.');
     }
   }
 
@@ -1162,7 +1035,7 @@ class API {
     try {
       return await this.request(`/shipping-address/${addressId}`, 'PUT', addressData);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to update shipping address.');
+      throw new Error(error.message || 'Failed to update shipping address.');
     }
   }
 
@@ -1173,7 +1046,7 @@ class API {
     try {
       return await this.request(`/shipping-address/${addressId}`, 'DELETE');
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to delete shipping address.');
+      throw new Error(error.message || 'Failed to delete shipping address.');
     }
   }
 
@@ -1181,7 +1054,7 @@ class API {
   async getUsersByRole(params = {}) {
     try {
       const queryParams = {
-        role: this.mapUserRole(params.role),
+        role: params.role,
         status: params.status,
         page: params.page || 1,
         limit: params.limit || 10,
@@ -1189,7 +1062,7 @@ class API {
       };
       return await this.request('/roles/users', 'GET', queryParams);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch users by role.');
+      throw new Error(error.message || 'Failed to fetch users by role.');
     }
   }
 
@@ -1199,12 +1072,12 @@ class API {
     }
     try {
       return await this.request(`/roles/users/${userId}/role`, 'PUT', {
-        role: this.mapUserRole(roleData.role),
+        role: roleData.role,
         status: roleData.status,
         userTypeId: roleData.userTypeId,
       });
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to update user role.');
+      throw new Error(error.message || 'Failed to update user role.');
     }
   }
 
@@ -1215,7 +1088,7 @@ class API {
     try {
       return await this.request(`/roles/users/${userId}/status`, 'PUT', statusData);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to update user status.');
+      throw new Error(error.message || 'Failed to update user status.');
     }
   }
 
@@ -1223,7 +1096,7 @@ class API {
     try {
       return await this.request('/roles/stats', 'GET');
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch role statistics.');
+      throw new Error(error.message || 'Failed to fetch role statistics.');
     }
   }
 
@@ -1240,7 +1113,7 @@ class API {
       };
       return await this.request('/users', 'GET', queryParams);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch users.');
+      throw new Error(error.message || 'Failed to fetch users.');
     }
   }
 
@@ -1251,7 +1124,7 @@ class API {
     try {
       return await this.request(`/users/${id}`, 'GET');
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch user.');
+      throw new Error(error.message || 'Failed to fetch user.');
     }
   }
 
@@ -1263,18 +1136,12 @@ class API {
       const cleanedData = {};
       Object.entries(userData).forEach(([key, value]) => {
         if (value !== null && value !== undefined && value !== '') {
-          if (key === 'role') {
-            cleanedData[key] = this.mapUserRole(value);
-          } else if (key === 'userType') {
-            cleanedData[key] = this.mapUserType(value);
-          } else {
-            cleanedData[key] = value;
-          }
+          cleanedData[key] = value;
         }
       });
       return await this.request(`/users/${id}`, 'PUT', cleanedData);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to update user.');
+      throw new Error(error.message || 'Failed to update user.');
     }
   }
 
@@ -1285,7 +1152,7 @@ class API {
     try {
       return await this.request(`/users/${id}`, 'DELETE');
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to delete user.');
+      throw new Error(error.message || 'Failed to delete user.');
     }
   }
 
@@ -1297,12 +1164,10 @@ class API {
       const cleanedData = {
         ...userData,
         email: userData.email.toLowerCase().trim(),
-        role: this.mapUserRole(userData.role),
-        userTypeId: userData.userTypeId,
       };
       return await this.request('/users', 'POST', cleanedData);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to create user.');
+      throw new Error(error.message || 'Failed to create user.');
     }
   }
 
@@ -1316,7 +1181,7 @@ class API {
       };
       return await this.request('/admin/users/pending', 'GET', queryParams);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch pending users.');
+      throw new Error(error.message || 'Failed to fetch pending users.');
     }
   }
 
@@ -1329,7 +1194,7 @@ class API {
       };
       return await this.request('/admin/users', 'GET', queryParams);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch users.');
+      throw new Error(error.message || 'Failed to fetch users.');
     }
   }
 
@@ -1340,7 +1205,7 @@ class API {
     try {
       return await this.request(`/admin/users/${userId}/approve`, 'PUT', statusData);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to update user status.');
+      throw new Error(error.message || 'Failed to update user status.');
     }
   }
 
@@ -1348,7 +1213,7 @@ class API {
     try {
       return await this.request('/admin/stats', 'GET');
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch user statistics.');
+      throw new Error(error.message || 'Failed to fetch user statistics.');
     }
   }
 
@@ -1366,7 +1231,7 @@ class API {
       };
       return await this.request('/enquiries', 'GET', queryParams);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch enquiries.');
+      throw new Error(error.message || 'Failed to fetch enquiries.');
     }
   }
 
@@ -1377,7 +1242,7 @@ class API {
     try {
       return await this.request(`/enquiries/${id}`, 'GET');
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch enquiry.');
+      throw new Error(error.message || 'Failed to fetch enquiry.');
     }
   }
 
@@ -1388,7 +1253,7 @@ class API {
     try {
       return await this.request('/enquiries', 'POST', enquiryData);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to create enquiry.');
+      throw new Error(error.message || 'Failed to create enquiry.');
     }
   }
 
@@ -1399,7 +1264,7 @@ class API {
     try {
       return await this.request(`/enquiries/${id}`, 'PUT', enquiryData);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to update enquiry.');
+      throw new Error(error.message || 'Failed to update enquiry.');
     }
   }
 
@@ -1410,7 +1275,7 @@ class API {
     try {
       return await this.request(`/enquiries/${id}`, 'DELETE');
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to delete enquiry.');
+      throw new Error(error.message || 'Failed to delete enquiry.');
     }
   }
 
@@ -1421,7 +1286,7 @@ class API {
     try {
       return await this.request(`/enquiries/${id}/respond`, 'POST', responseData);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to respond to enquiry.');
+      throw new Error(error.message || 'Failed to respond to enquiry.');
     }
   }
 
@@ -1430,7 +1295,7 @@ class API {
     try {
       return await this.request('/addresses', 'GET');
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch addresses.');
+      throw new Error(error.message || 'Failed to fetch addresses.');
     }
   }
 
@@ -1441,7 +1306,7 @@ class API {
     try {
       return await this.request('/addresses', 'POST', addressData);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to create address.');
+      throw new Error(error.message || 'Failed to create address.');
     }
   }
 
@@ -1452,7 +1317,7 @@ class API {
     try {
       return await this.request(`/addresses/${addressId}`, 'PUT', addressData);
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to update address.');
+      throw new Error(error.message || 'Failed to update address.');
     }
   }
 
@@ -1463,7 +1328,7 @@ class API {
     try {
       return await this.request(`/addresses/${addressId}`, 'DELETE');
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to delete address.');
+      throw new Error(error.message || 'Failed to delete address.');
     }
   }
 
@@ -1472,7 +1337,7 @@ class API {
     try {
       return await this.request('/auth/me', 'GET');
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to fetch profile.');
+      throw new Error(error.message || 'Failed to fetch profile.');
     }
   }
 
@@ -1481,13 +1346,7 @@ class API {
       const cleanedData = {};
       Object.entries(profileData).forEach(([key, value]) => {
         if (value !== null && value !== undefined && value !== '') {
-          if (key === 'role') {
-            cleanedData[key] = this.mapUserRole(value);
-          } else if (key === 'userType') {
-            cleanedData[key] = this.mapUserType(value);
-          } else {
-            cleanedData[key] = value;
-          }
+          cleanedData[key] = value;
         }
       });
       const response = await this.request('/auth/me', 'PUT', cleanedData);
@@ -1496,7 +1355,7 @@ class API {
       }
       return response;
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to update profile.');
+      throw new Error(error.message || 'Failed to update profile.');
     }
   }
 
@@ -1509,8 +1368,12 @@ class API {
     return localStorage.getItem('userRole') || 'General';
   }
 
-  getUserType() {
-    return localStorage.getItem('userType') || 'General';
+  getUserTypeName() {
+    return localStorage.getItem('userTypeName') || 'General';
+  }
+
+  getUserTypeId() {
+    return localStorage.getItem('userTypeId') || null;
   }
 
   getUserStatus() {
@@ -1545,7 +1408,7 @@ class API {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to upload file.');
+      throw new Error(error.message || 'Failed to upload file.');
     }
   }
 
@@ -1567,9 +1430,36 @@ class API {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
     } catch (error) {
-      throw new Error(error.response?.data?.message || 'Failed to upload files.');
+      throw new Error(error.message || 'Failed to upload files.');
     }
   }
+  // Add these methods inside the API class in your API file
+async getAllSeo() {
+  try {
+    return await this.request('/api/seo', 'GET');
+  } catch (error) {
+    throw new Error(error.message || 'Failed to fetch SEO data.');
+  }
+}
+
+async getAllPageNames() {
+  try {
+    return await this.request('/api/seo/pagenames', 'GET');
+  } catch (error) {
+    throw new Error(error.message || 'Failed to fetch page names.');
+  }
+}
+
+async updateSeo(id, seoData) {
+  if (!id || !seoData?.pageName || !seoData?.title) {
+    throw new Error('SEO ID, pageName, and title are required');
+  }
+  try {
+    return await this.request(`/api/seo/${id}`, 'PUT', seoData);
+  } catch (error) {
+    throw new Error(error.message || 'Failed to update SEO data.');
+  }
+}
 }
 
 // Create and export a singleton instance

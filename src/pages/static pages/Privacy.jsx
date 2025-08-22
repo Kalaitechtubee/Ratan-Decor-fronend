@@ -2,12 +2,28 @@ import React from 'react';
 import Navbar from '../../components/Navbar';
 import Footer from '../../components/Footer';
 import useScrollToTop from '../../hooks/useScrollToTop';
+import { useSeo } from '../../context/SeoContext'; // Import useSeo hook
+import { Helmet } from 'react-helmet-async'; // Import Helmet for local SEO overrides if needed
 
 const Privacy = () => {
   useScrollToTop();
+  const { seoData } = useSeo(); // Access SEO data from context
+
+  // Use SEO data for the 'privacy' page, fallback to default if not available
+  const seo = seoData['privacy'] || {
+    title: 'Privacy Policy - Ratan Decor',
+    description: 'Learn about Ratan Decor\'s privacy practices and how we protect your personal information.',
+    keywords: 'privacy, policy, data protection, ratan decor',
+  };
+
   return (
     <div className="min-h-screen bg-gray-50 font-roboto">
-      <Navbar/>
+      <Helmet>
+        <title>{seo.title}</title>
+        <meta name="description" content={seo.description} />
+        <meta name="keywords" content={seo.keywords} />
+      </Helmet>
+      <Navbar />
       <div className="max-w-4xl mx-auto px-4 py-12 sm:px-6 lg:px-8">
         <h1 className="text-4xl font-bold text-[#ff4747] mb-8 text-center">Privacy Policy</h1>
 
@@ -95,7 +111,7 @@ const Privacy = () => {
           </p>
         </section>
       </div>
-      <Footer/>
+      <Footer />
     </div>
   );
 };
